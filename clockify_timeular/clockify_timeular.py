@@ -3,7 +3,6 @@ A simple linkage between a Timular cube and Hackaru.
 """
 
 import asyncio
-import http.cookiejar
 import logging
 import os
 import signal
@@ -22,7 +21,6 @@ import yaml
 from bleak import BleakClient  # type: ignore
 from recordclass import RecordClass  # type: ignore
 from requests import Session
-from tenacity import retry  # type: ignore
 
 MODEL_NUMBER_UUID = "00002a24-0000-1000-8000-00805f9b34fb"
 MANUFACTURER_UUID = "00002a29-0000-1000-8000-00805f9b34fb"
@@ -98,36 +96,6 @@ def now():
     return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-@retry
-def login(session, config):
-    """Login to Hackaru Server"""
-    data = f'{{"user":{{"email":"{config["email"]}","password":"{getpass()}"}}}}'
-    response = session.post(
-        config["hackaru"]["endpoint"] + "/auth/auth_tokens",
-        data=data,
-        headers=HEADERS,
-    )
-
-    response.raise_for_status()
-    session.cookies.save()
-
-
-def prompt_for_password(cli: bool):
-    if cli:
-        return getpass()
-    else:
-        root = tk.Tk()
-        root.overrideredirect(1)
-        root.withdraw()
-
-        return (
-            simpledialog.askstring(
-                title="Task Description", prompt="What are you working on?", show="*"
-            )
-            or ""
-        )
-
-
 def callback_with_state(
     state: State, sender: int, data: bytearray  # pylint: disable=unused-argument
 ):
@@ -158,14 +126,12 @@ def get_task(state: State, orientation: int):
     )
 
     result = {
-        #"task_id": task["id"],
         "description": task["description"]
     }
 
     project = next(filter(lambda project: project["name"] == task["project"], state.config["projects"]), None)
 
     if project:
-        print(f"found projext with id {project['id']} and name {project['name']}")
         result["project_id"] = project["id"] 
     else:
         data = {
@@ -185,28 +151,17 @@ def get_task(state: State, orientation: int):
 
 def start_task(state: State, description: str, project_id: str = None):
     """Start a task in Clockify"""
-    #data = f'{{"activity":{{"description":"{description or prompt_for_description(state.config["cli"])}","project_id":{project_id},"started_at":"{now()}"}}}}'
     data = {
         "description": description,
         "start": now(),
     }
-    if project_id:
-        data["projectId"] = project_id #TODO improve this with typescript
-
-    print("starting task")
-    print(state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/time-entries")
-    print("with data")
-    print(data)
 
     resp = state.session.post(
         state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/time-entries", 
         json=data, 
         headers=HEADERS
     )
-
     state.current_task = resp.json()
-    print("response")
-    print(state.current_task)
 
 
 def prompt_for_description(cli: bool):
@@ -295,47 +250,23 @@ def main():
         session = requests.Session()
 
         HEADERS['x-api-key'] = config["clockify"]["api-key"]
-        """
-        session.cookies = http.cookiejar.LWPCookieJar(filename=cookies_file)
-        try:
-            session.cookies.load(ignore_discard=True)
-            session.cookies.clear_expired_cookies()
-        except FileNotFoundError:
-            print("cookie file was not found: ", cookies_file)
-            pass
-
-        if not session.cookies:
-            login(session, config)
-        """
         user_data = session.get(config["clockify"]["endpoint"] + '/user', headers=HEADERS).json()
         config["workspace"] = user_data['activeWorkspace']
         config["user_id"] = user_data['id']
-
-        "https://api.clockify.me/api/v1/workspaces/{workspaceId}/user/{userId}/time-entries"
 
         time_entries = session.get(
             config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/user/{config['user_id']}/time-entries", 
             headers=HEADERS
         ).json()
-        
-        #print(time_entries)
                 
         config["projects"] = session.get(
             config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/projects", 
             headers=HEADERS
         ).json()
-        #print(projects)
 
         current_time_entry = next(filter(lambda time_entry: time_entry["timeInterval"]["end"] is None, time_entries), None)
 
-        if current_time_entry:
-            print(current_time_entry)
         state = State(config=config, current_task=current_time_entry, session=session)
         killer = GracefulKiller(state)
 
         asyncio.run(main_loop(state, killer))
-        """
-        data = {'x-api-key': config["clockify"]["api-key"]}
-        r = session.get(config["clockify"]["endpoint"] + '/user', headers=data)
-        print(r.content)
-        """
