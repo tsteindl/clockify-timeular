@@ -8,14 +8,13 @@ long_description = (this_directory / "README.md").read_text()
 
 setup(
     name="clockify_timeular",
-    version="0.2.0",
-    description="Track your time with the Timeular cube and Hackaru",
+    version="0.1.0",
+    description="Track your time with the Timeular cube and Clockify, credits: https://github.com/pSub/hackaru-timeular",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/pSub/hackaru-timeular",
-    author="Pascal Wittmann",
-    author_email="github@pascal-wittmann.de",
-    license="MIT",
+    url="https://github.com/tsteindl/clockify-timeular",
+    author="Tobias Steindl",
+    author_email="tobias.steindl@gmx.net",
     packages=["clockify_timeular"],
     install_requires=[
         "bleak",

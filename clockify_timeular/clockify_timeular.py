@@ -45,7 +45,6 @@ timeular:
 
 clockify:
     endpoint: str()
-    email: str()
     api-key: str()
 
 mapping: list(include('task-mapping'))
@@ -53,8 +52,8 @@ mapping: list(include('task-mapping'))
 ---
 
 clockify-task:
-    id: str()
-    project_id: str(required=False)
+    description: str()
+    project: str()
 
 task-mapping:
     side: int(min=1, max=9)
@@ -159,33 +158,40 @@ def get_task(state: State, orientation: int):
     )
 
     result = {
-        "task_id": task["id"],
+        #"task_id": task["id"],
+        "description": task["description"]
     }
-    if task.get("project_id"):
-        result["project_id"] = task["project_id"] #TODO improve with ts
+
+    project = next(filter(lambda project: project["name"] == task["project"], state.config["projects"]), None)
+
+    if project:
+        print(f"found projext with id {project['id']} and name {project['name']}")
+        result["project_id"] = project["id"] 
+    else:
+        data = {
+            "name": task["project"]
+        }
+        resp = state.session.post(
+            state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/projects", 
+            json=data, 
+            headers=HEADERS
+        )
+        if resp.status_code == 201:
+            project = resp.json()
+            result["project_id"] = project["id"]
+
     return result
 
 
-def start_task(state: State, task_id: str, project_id: str = None):
+def start_task(state: State, description: str, project_id: str = None):
     """Start a task in Clockify"""
     #data = f'{{"activity":{{"description":"{description or prompt_for_description(state.config["cli"])}","project_id":{project_id},"started_at":"{now()}"}}}}'
     data = {
-        "billable": True,
-        "customAttributes": [
-        ],
-        "customFields": [
-        ],
-        "description": "This is a sample time entry description.",
-        "end": now(),
-        "projectId": project_id,
+        "description": description,
         "start": now(),
-        #"taskId": task_id,
-        "tagIds": [],
-        "type": "REGULAR",
-        
     }
-    #if project_id:
-     #   data["projectId"] = project_id #TODO improve this with typescript
+    if project_id:
+        data["projectId"] = project_id #TODO improve this with typescript
 
     print("starting task")
     print(state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/time-entries")
@@ -261,8 +267,6 @@ async def main_loop(state: State, killer: GracefulKiller):
     """Main loop listening for orientation changes"""
 
     async with BleakClient(state.config["timeular"]["device-address"]) as client:
-        print("hey from main loop")
-
         await print_device_information(client)
 
         callback = partial(callback_with_state, state)
@@ -285,12 +289,9 @@ def main():
         data = yamale.make_data(config_file.name)
         yamale.validate(CONFIG_SCHEMA, data)
 
-        #config["task_endpoint"] = config["clockify"]["endpoint"] + "/v1/activities"
-
         if "cli" not in config:
             config["cli"] = False
 
-        #cookies_file = os.path.join(config_dir, "cookies.txt")
         session = requests.Session()
 
         HEADERS['x-api-key'] = config["clockify"]["api-key"]
@@ -317,32 +318,19 @@ def main():
             headers=HEADERS
         ).json()
         
-        print(time_entries)
-        """
-        
-        projects = session.get(
+        #print(time_entries)
+                
+        config["projects"] = session.get(
             config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/projects", 
             headers=HEADERS
         ).json()
         #print(projects)
 
-        print(config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/projects/{projects[0]['id']}/tasks")
-        task = session.get(
-                config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/projects/{projects[0]['id']}/tasks", 
-                headers=HEADERS
-            ).json()
-        
-        print(task)
-        return
+        current_time_entry = next(filter(lambda time_entry: time_entry["timeInterval"]["end"] is None, time_entries), None)
 
-        tasks = [
-            project['id']
-            for project in projects]
-        print(tasks)
-
-        return
-        """
-        state = State(config=config, current_task=time_entries, session=session)
+        if current_time_entry:
+            print(current_time_entry)
+        state = State(config=config, current_task=current_time_entry, session=session)
         killer = GracefulKiller(state)
 
         asyncio.run(main_loop(state, killer))
