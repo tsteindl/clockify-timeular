@@ -53,9 +53,8 @@ mapping: list(include('task-mapping'))
 ---
 
 clockify-task:
-    name: str(required=False)
-    id: int()
-    description: str(required=False)
+    id: str()
+    project_id: str(required=False)
 
 task-mapping:
     side: int(min=1, max=9)
@@ -97,7 +96,7 @@ class GracefulKiller:
 
 def now():
     """Returns the current time as a formatted string"""
-    return datetime.utcnow().strftime("%a %B %d %Y %H:%M:%S")
+    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 @retry
@@ -159,19 +158,49 @@ def get_task(state: State, orientation: int):
         if mapping["side"] == orientation
     )
 
-    return {
-        "project_id": task["id"],
-        "description": task.get("description", ""),
+    result = {
+        "task_id": task["id"],
     }
+    if task.get("project_id"):
+        result["project_id"] = task["project_id"] #TODO improve with ts
+    return result
 
 
-def start_task(state: State, project_id: int, description: str):
-    """Start a task in Hackaru"""
-    data = f'{{"activity":{{"description":"{description or prompt_for_description(state.config["cli"])}","project_id":{project_id},"started_at":"{now()}"}}}}'
+def start_task(state: State, task_id: str, project_id: str = None):
+    """Start a task in Clockify"""
+    #data = f'{{"activity":{{"description":"{description or prompt_for_description(state.config["cli"])}","project_id":{project_id},"started_at":"{now()}"}}}}'
+    data = {
+        "billable": True,
+        "customAttributes": [
+        ],
+        "customFields": [
+        ],
+        "description": "This is a sample time entry description.",
+        "end": now(),
+        "projectId": project_id,
+        "start": now(),
+        #"taskId": task_id,
+        "tagIds": [],
+        "type": "REGULAR",
+        
+    }
+    #if project_id:
+     #   data["projectId"] = project_id #TODO improve this with typescript
 
-    resp = state.session.post(state.config["task_endpoint"], data=data, headers=HEADERS)
+    print("starting task")
+    print(state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/time-entries")
+    print("with data")
+    print(data)
+
+    resp = state.session.post(
+        state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/time-entries", 
+        json=data, 
+        headers=HEADERS
+    )
 
     state.current_task = resp.json()
+    print("response")
+    print(state.current_task)
 
 
 def prompt_for_description(cli: bool):
@@ -191,15 +220,15 @@ def prompt_for_description(cli: bool):
 
 
 def stop_current_task(state: State):
-    """Stop a task in Hackaru"""
+    """Stop a task in Clockify"""
     if state.current_task is None:
         return
 
-    data = f'{{"activity":{{"id":{state.current_task["id"]},"stopped_at":"{now()}"}}}}'
+    data = {"end": now()}
 
-    state.session.put(
-        state.config["task_endpoint"] + "/" + str(state.current_task["id"]),
-        data=data,
+    state.session.patch(
+        state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/user/{state.config['user_id']}/time-entries",
+        json=data,
         headers=HEADERS,
     )
 
@@ -230,7 +259,7 @@ async def print_device_information(client):
 
 async def main_loop(state: State, killer: GracefulKiller):
     """Main loop listening for orientation changes"""
-    
+
     async with BleakClient(state.config["timeular"]["device-address"]) as client:
         print("hey from main loop")
 
@@ -278,16 +307,42 @@ def main():
             login(session, config)
         """
         user_data = session.get(config["clockify"]["endpoint"] + '/user', headers=HEADERS).json()
+        config["workspace"] = user_data['activeWorkspace']
+        config["user_id"] = user_data['id']
 
         "https://api.clockify.me/api/v1/workspaces/{workspaceId}/user/{userId}/time-entries"
 
-        current_task = session.get(
-            config["clockify"]["endpoint"] + f"/workspaces/{user_data['activeWorkspace']}/user/{user_data['id']}/time-entries", headers=HEADERS
+        time_entries = session.get(
+            config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/user/{config['user_id']}/time-entries", 
+            headers=HEADERS
         ).json()
         
-        print(current_task)
+        print(time_entries)
+        """
+        
+        projects = session.get(
+            config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/projects", 
+            headers=HEADERS
+        ).json()
+        #print(projects)
 
-        state = State(config=config, current_task=current_task, session=session)
+        print(config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/projects/{projects[0]['id']}/tasks")
+        task = session.get(
+                config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/projects/{projects[0]['id']}/tasks", 
+                headers=HEADERS
+            ).json()
+        
+        print(task)
+        return
+
+        tasks = [
+            project['id']
+            for project in projects]
+        print(tasks)
+
+        return
+        """
+        state = State(config=config, current_task=time_entries, session=session)
         killer = GracefulKiller(state)
 
         asyncio.run(main_loop(state, killer))
