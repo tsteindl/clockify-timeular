@@ -149,11 +149,12 @@ def get_task(state: State, orientation: int):
     return result
 
 
-def start_task(state: State, description: str, project_id: str = None):
+def start_task(state: State, description: str, project_id: str):
     """Start a task in Clockify"""
     data = {
         "description": description,
         "start": now(),
+        "projectId": project_id
     }
 
     resp = state.session.post(
@@ -161,8 +162,13 @@ def start_task(state: State, description: str, project_id: str = None):
         json=data, 
         headers=HEADERS
     )
-    state.current_task = resp.json()
-
+    if resp.status_code == 201:
+        state.current_task = resp.json()
+        proj = next(filter(lambda project: project['id'] == state.current_task['projectId'], state.config['projects']), None)
+        if proj["name"]:
+            logger.info(f"Started time entry {state.current_task['description']} from project {proj['name']}")
+        else:
+            logger.info(f"Started time entry {state.current_task['description']}")
 
 def prompt_for_description(cli: bool):
     if cli:
@@ -221,15 +227,22 @@ async def print_device_information(client):
 async def main_loop(state: State, killer: GracefulKiller):
     """Main loop listening for orientation changes"""
 
-    async with BleakClient(state.config["timeular"]["device-address"]) as client:
-        await print_device_information(client)
+    while not killer.kill_now:
+        try:
+            async with BleakClient(state.config["timeular"]["device-address"]) as client:
+                await print_device_information(client)
 
-        callback = partial(callback_with_state, state)
+                callback = partial(callback_with_state, state)
 
-        await client.start_notify(ORIENTATION_UUID, callback)
+                await client.start_notify(ORIENTATION_UUID, callback)
 
-        while not killer.kill_now:
-            await asyncio.sleep(1)
+                while not killer.kill_now:
+                    await asyncio.sleep(1)
+        except Exception as e:
+            logging.error(f"Failed to connect to client: {e}\nRetrying in 5 seconds...")
+            await asyncio.sleep(5)
+
+    
 
 
 def main():
