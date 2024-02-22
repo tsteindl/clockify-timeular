@@ -1,7 +1,3 @@
-"""
-A simple linkage between a Timular cube and Hackaru.
-"""
-
 import asyncio
 import logging
 import os
@@ -64,9 +60,7 @@ logging.basicConfig()
 logger = logging.getLogger("clockify_timular")
 logger.setLevel(logging.INFO)
 
-
 state_lock = Lock()
-
 
 class State(RecordClass):
     """Application state"""
@@ -75,7 +69,6 @@ class State(RecordClass):
     current_task: Optional[dict]
     config: dict
     session: Session
-
 
 class GracefulKiller:
     kill_now = False
@@ -90,11 +83,9 @@ class GracefulKiller:
         logger.info("Stopped current task, shutting down.")
         self.kill_now = True
 
-
 def now():
     """Returns the current time as a formatted string"""
     return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-
 
 def callback_with_state(
     state: State, sender: int, data: bytearray  # pylint: disable=unused-argument
@@ -115,7 +106,6 @@ def callback_with_state(
             start_task(state, **task)
         except StopIteration:
             logger.error("There is no task assigned for side %i", orientation)
-
 
 def get_task(state: State, orientation: int):
     """Retrieve a task for an orientation from the config file"""
@@ -148,7 +138,6 @@ def get_task(state: State, orientation: int):
 
     return result
 
-
 def start_task(state: State, description: str, project_id: str):
     """Start a task in Clockify"""
     data = {
@@ -165,7 +154,7 @@ def start_task(state: State, description: str, project_id: str):
     if resp.status_code == 201:
         state.current_task = resp.json()
         proj = next(filter(lambda project: project['id'] == state.current_task['projectId'], state.config['projects']), None)
-        if proj["name"]:
+        if proj and proj["name"]:
             logger.info(f"Started time entry {state.current_task['description']} from project {proj['name']}")
         else:
             logger.info(f"Started time entry {state.current_task['description']}")
