@@ -142,6 +142,15 @@ def get_time_entry(state: State, orientation: int):
     print(time_entry)
     #get task if exists
     if "task" in time_entry:
+        if project["id"] not in state.config["tasks"]:
+            #on demand requesting of tasks for projects
+            resp = state.session.get(
+                state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/projects/{project['id']}/tasks", 
+                headers=HEADERS
+            )
+            if resp.status_code == 200:
+                state.config["tasks"][project["id"]] = resp.json()
+        
         task = next(filter(lambda task: task["name"] == time_entry["task"], state.config["tasks"][project["id"]]), None)
         if task:
             result["task_id"] = task["id"]
@@ -157,19 +166,15 @@ def get_time_entry(state: State, orientation: int):
             )
             if resp.status_code == 201:
                 task = resp.json()
-                print("response")
-                print(task)
                 result["task_id"] = task["id"]
                 state.config["tasks"][project["id"]].append(task)
-        print("task:")
-        print(task)
 
     print("got time entry")
     print(result)
     return result
 
 def start_time_entry(state: State, description: str, project_id: str, task_id: str = None):
-    """Start a task in Clockify"""
+    """Start a time entry in Clockify"""
     data = {
         "description": description,
         "start": now(),
@@ -300,18 +305,8 @@ def main():
         ).json()
 
 
-        #TODO: concurrent requests
         config["tasks"] = {}
-        for project in config["projects"]:
-            resp = session.get(
-                config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/projects/{project['id']}/tasks", 
-                headers=HEADERS
-            )
-            if resp.status_code == 200:
-                config["tasks"][project["id"]] = resp.json()
-
-        print(config["tasks"])
-
+        
         current_time_entry = next(filter(lambda time_entry: time_entry["timeInterval"]["end"] is None, time_entries), None)
 
         state = State(config=config, current_task=current_time_entry, session=session)
