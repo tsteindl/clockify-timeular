@@ -41,17 +41,18 @@ clockify:
     endpoint: str()
     api-key: str()
 
-mapping: list(include('task-mapping'))
+mapping: list(include('time_entry-mapping'))
 
 ---
 
-clockify-task:
+clockify-time_entry:
     description: str()
     project: str()
+    task: str(required=False)
 
-task-mapping:
+time_entry-mapping:
     side: int(min=1, max=9)
-    task: include('clockify-task')
+    time_entry: include('clockify-time_entry')
 """
 )
 
@@ -102,30 +103,30 @@ def callback_with_state(
 
         stop_current_task(state)
         try:
-            task = get_task(state, orientation)
-            start_task(state, **task)
+            time_entry = get_time_entry(state, orientation)
+            start_time_entry(state, **time_entry)
         except StopIteration:
             logger.error("There is no task assigned for side %i", orientation)
 
-def get_task(state: State, orientation: int):
-    """Retrieve a task for an orientation from the config file"""
-    task = next(
-        mapping["task"]
+def get_time_entry(state: State, orientation: int):
+    """Retrieve project (and task) for an orientation from the config file"""
+    time_entry = next(
+        mapping["time_entry"]
         for mapping in state.config["mapping"]
         if mapping["side"] == orientation
     )
 
     result = {
-        "description": task["description"]
+        "description": time_entry["description"]
     }
 
-    project = next(filter(lambda project: project["name"] == task["project"], state.config["projects"]), None)
+    project = next(filter(lambda project: project["name"] == time_entry["project"], state.config["projects"]), None)
 
     if project:
         result["project_id"] = project["id"] 
     else:
         data = {
-            "name": task["project"]
+            "name": time_entry["project"]
         }
         resp = state.session.post(
             state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/projects", 
@@ -135,16 +136,48 @@ def get_task(state: State, orientation: int):
         if resp.status_code == 201:
             project = resp.json()
             result["project_id"] = project["id"]
+            state.config["projects"].append(project)
 
+    print("time entry:")
+    print(time_entry)
+    #get task if exists
+    if "task" in time_entry:
+        task = next(filter(lambda task: task["name"] == time_entry["task"], state.config["tasks"][project["id"]]), None)
+        if task:
+            result["task_id"] = task["id"]
+        else:
+            #create new task
+            data = {
+                "name": time_entry["task"]
+            }
+            resp = state.session.post(
+                state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/projects/{project['id']}/tasks", 
+                json=data,
+                headers=HEADERS
+            )
+            if resp.status_code == 201:
+                task = resp.json()
+                print("response")
+                print(task)
+                result["task_id"] = task["id"]
+                state.config["tasks"][project["id"]].append(task)
+        print("task:")
+        print(task)
+
+    print("got time entry")
+    print(result)
     return result
 
-def start_task(state: State, description: str, project_id: str):
+def start_time_entry(state: State, description: str, project_id: str, task_id: str = None):
     """Start a task in Clockify"""
     data = {
         "description": description,
         "start": now(),
         "projectId": project_id
     }
+
+    if task_id:
+        data["taskId"] = task_id
 
     resp = state.session.post(
         state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/time-entries", 
@@ -260,11 +293,24 @@ def main():
             config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/user/{config['user_id']}/time-entries", 
             headers=HEADERS
         ).json()
-                
+          
         config["projects"] = session.get(
             config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/projects", 
             headers=HEADERS
         ).json()
+
+
+        #TODO: concurrent requests
+        config["tasks"] = {}
+        for project in config["projects"]:
+            resp = session.get(
+                config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/projects/{project['id']}/tasks", 
+                headers=HEADERS
+            )
+            if resp.status_code == 200:
+                config["tasks"][project["id"]] = resp.json()
+
+        print(config["tasks"])
 
         current_time_entry = next(filter(lambda time_entry: time_entry["timeInterval"]["end"] is None, time_entries), None)
 

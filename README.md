@@ -16,6 +16,8 @@ python setup.py clean --all && pip install . && clockify-timeular
 
 - pomodoro
 - more features (tags?)
+- adapt features from timeular
+    - only register task after one minute has passed
 - auto generate files in appdata
 - improve user interaction for updating tasks (maybe like in timeular)
 - "what are you working on"
