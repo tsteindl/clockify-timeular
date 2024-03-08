@@ -11,6 +11,7 @@ python setup.py clean --all && pip install . && clockify-timeular
 
 
 # TODO
+- hot reload tasks
 - fix stuff with venv
 - make so that it automatically runs / or at least is easy to call 
 

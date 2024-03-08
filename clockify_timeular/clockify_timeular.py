@@ -46,8 +46,8 @@ mapping: list(include('time_entry-mapping'))
 ---
 
 clockify-time_entry:
-    description: str()
-    project: str()
+    description: str(required=False)
+    project: str(required=False)
     task: str(required=False)
 
 time_entry-mapping:
