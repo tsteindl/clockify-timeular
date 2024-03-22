@@ -18,7 +18,6 @@ import yaml
 from bleak import BleakClient  # type: ignore
 from recordclass import RecordClass  # type: ignore
 from requests import Session
-import time
 
 MODEL_NUMBER_UUID = "00002a24-0000-1000-8000-00805f9b34fb"
 MANUFACTURER_UUID = "00002a29-0000-1000-8000-00805f9b34fb"
@@ -94,7 +93,7 @@ def now():
     return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 async def callback_with_state(
-    state: State, client: BleakClient, sender: int, data: bytearray  # pylint: disable=unused-argument
+    state: State, sender: int, data: bytearray  # pylint: disable=unused-argument
 ):
     """Callback for orientation changes of the Timeular cube"""
     assert len(data) == 1
@@ -108,15 +107,18 @@ async def callback_with_state(
 
         stop_current_task(state)
         try:
+
             start_time = now()
             prev_state = copy.deepcopy(orientation) #todo maybe deepcopy is not needed
-            time.sleep(10) #wait for 10 sec before logging time entry
+            await asyncio.sleep(3) #wait for 1 minute before logging time entry
+            print("waited for 1 minute")
             print(f"{prev_state == state = }")
             if orientation != prev_state:
-                #orientation was changed so new time entry should be started
-                callback = partial(callback_with_state, state, client)
+                print(f"{prev_state}")
+                print(f"{state}")
+                #orientation was changed
                 await client.start_notify(ORIENTATION_UUID, callback)
-                return
+                return  
 
             time_entry = get_time_entry(state, orientation)
             start_time_entry(state, start_time, **time_entry)
@@ -184,6 +186,8 @@ def get_time_entry(state: State, orientation: int):
                 result["task_id"] = task["id"]
                 state.config["tasks"][project["id"]].append(task)
 
+    print("got time entry")
+    print(result)
     return result
 
 def start_time_entry(state: State, start_time: str, description: str, project_id: str, task_id: str = None):
@@ -272,7 +276,7 @@ async def main_loop(state: State, killer: GracefulKiller):
             async with BleakClient(state.config["timeular"]["device-address"]) as client:
                 await print_device_information(client)
 
-                callback = partial(callback_with_state, state, client)
+                callback = partial(callback_with_state, state)
 
                 await client.start_notify(ORIENTATION_UUID, callback)
 
