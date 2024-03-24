@@ -79,6 +79,14 @@ class State(RecordClass):
 
     def __eq__(self, other):
         return isinstance(other, State) and self.current_task is not None and other.current_task is not None and self.current_task.id == other.current_task.id
+    
+    async def change(self, orientation):
+        await asyncio.sleep(10)
+        print(f"{self.orientation == orientation = }")
+        if self.orientation == orientation:
+            time_entry = get_time_entry(self, self.orientation)
+            start_time_entry(self, self.start_time, **time_entry)
+
 
 class GracefulKiller:
     kill_now = False
@@ -109,28 +117,13 @@ async def callback_with_state(
         return
 
     stop_current_task(state)
-    with state_lock:
-        try:
-            print(f"{state.orientation == orientation = }")
-            if orientation != state.orientation:
-                print("new orientation", orientation)
-                state.orientation = orientation
-                if not state.to_be_changed:
-                    state.elapsed_time = 0
-                    state.to_be_changed = True  
-                    state.start_time = now()
-            
-            
-            print(f"{state.elapsed_time = }")
-            print(f"{state.to_be_changed = }")
-            if state.elapsed_time >= 10 and state.to_be_changed:
-                time_entry = get_time_entry(state, state.orientation)
-                start_time_entry(state, state.start_time, **time_entry)
-                state.to_be_changed = False
-            else:
-                print("need to wait ", 10-state.elapsed_time) #todo remove this
-        except StopIteration:
-            logger.error("There is no task assigned for side %i", orientation)
+    # with state_lock:
+    try:
+        state.orientation = orientation
+        state.start_time = now()
+        await state.change(orientation) #todo await should not be needed here
+    except StopIteration:
+        logger.error("There is no task assigned for side %i", orientation)
 
 def get_time_entry(state: State, orientation: int):
     """Retrieve project (and task) for an orientation from the config file"""
@@ -286,8 +279,8 @@ async def main_loop(state: State, killer: GracefulKiller):
                 await client.start_notify(ORIENTATION_UUID, callback)
 
                 while not killer.kill_now:
-                    state.elapsed_time += 1
-                    print(f"{state.elapsed_time=}")
+                    # state.elapsed_time += 1
+                    # print(f"{state.elapsed_time=}")
                     await asyncio.sleep(1)
         except Exception as e:
             logging.error(f"Failed to connect to client: {e}\nRetrying in 5 seconds...")
