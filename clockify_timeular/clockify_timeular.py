@@ -71,7 +71,6 @@ class State(RecordClass):
     # pylint: disable=too-few-public-methods
     current_task: Optional[dict]
     config_dir: str
-    mapping: Dict[int, Dict[str, dict]]
     config: dict
     session: Session
     orientation: int
@@ -79,7 +78,6 @@ class State(RecordClass):
 
     async def change(self, orientation):
         await asyncio.sleep(10)
-        print(f"{self.orientation == orientation = }")
         if self.orientation == orientation:
             time_entry = get_time_entry(self, self.orientation)
             start_time_entry(self, self.start_time, **time_entry)
@@ -280,8 +278,7 @@ async def main_loop(state: State, killer: GracefulKiller):
                             os.path.join(state.config_dir, "config.yml"), "r", encoding="utf-8"
                         ) as config_file:
                             config = yaml.safe_load(config_file)
-                            orig_config = copy.deepcopy(config)
-                            if state.mapping != orig_config["mapping"]:
+                            if state.config["mapping"] != config["mapping"]:
                                 data = yamale.make_data(config_file.name)
                                 yamale.validate(CONFIG_SCHEMA, data)
                                 for i, mapping in enumerate(state.config["mapping"]):
@@ -294,19 +291,6 @@ async def main_loop(state: State, killer: GracefulKiller):
         except Exception as e:
             logging.error(f"Failed to connect to client: {e}\nRetrying in 5 seconds...")
             await asyncio.sleep(5)
-
-async def update_state_loop(state, config_dir, killer):
-    while not killer.kill_now:
-        with open(
-            os.path.join(config_dir, "config.yml"), "r", encoding="utf-8"
-        ) as config_file:
-            state.config.update(yaml.safe_load(config_file))
-
-            data = yamale.make_data(config_file.name)
-            yamale.validate(CONFIG_SCHEMA, data)
-            print("updated state")
-            while not killer.kill_now:
-                await asyncio.sleep(1)
 
 
 def main():
@@ -346,7 +330,7 @@ def main():
         
         current_time_entry = next(filter(lambda time_entry: time_entry["timeInterval"]["end"] is None, time_entries), None)
 
-        state = State(config=config, config_dir=config_dir, mapping=config["mapping"], current_task=current_time_entry, session=session, orientation=0, start_time=now())
+        state = State(config=config, config_dir=config_dir, current_task=current_time_entry, session=session, orientation=0, start_time=now())
         killer = GracefulKiller(state)
 
         asyncio.run(main_loop(state, killer))
