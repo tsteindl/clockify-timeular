@@ -72,6 +72,10 @@ class State(RecordClass):
     current_task: Optional[dict]
     config: dict
     session: Session
+    orientation: int
+    start_time: str    
+    elapsed_time: int
+    to_be_changed: bool
 
     def __eq__(self, other):
         return isinstance(other, State) and self.current_task is not None and other.current_task is not None and self.current_task.id == other.current_task.id
@@ -100,26 +104,31 @@ async def callback_with_state(
     assert len(data) == 1
     orientation = data[0]
     logger.info("Orientation: %i", orientation)
-
-    with state_lock:
-        if orientation not in range(1, 9):
-            stop_current_task(state)
-            return
-
+    if orientation not in range(1, 9):
         stop_current_task(state)
-        try:
-            start_time = now()
-            prev_state = copy.deepcopy(orientation) #todo maybe deepcopy is not needed
-            time.sleep(10) #wait for 10 sec before logging time entry
-            print(f"{prev_state == state = }")
-            if orientation != prev_state:
-                #orientation was changed so new time entry should be started
-                callback = partial(callback_with_state, state, client)
-                await client.start_notify(ORIENTATION_UUID, callback)
-                return
+        return
 
-            time_entry = get_time_entry(state, orientation)
-            start_time_entry(state, start_time, **time_entry)
+    stop_current_task(state)
+    with state_lock:
+        try:
+            print(f"{state.orientation == orientation = }")
+            if orientation != state.orientation:
+                print("new orientation", orientation)
+                state.orientation = orientation
+                if not state.to_be_changed:
+                    state.elapsed_time = 0
+                    state.to_be_changed = True  
+                    state.start_time = now()
+            
+            
+            print(f"{state.elapsed_time = }")
+            print(f"{state.to_be_changed = }")
+            if state.elapsed_time >= 10 and state.to_be_changed:
+                time_entry = get_time_entry(state, state.orientation)
+                start_time_entry(state, state.start_time, **time_entry)
+                state.to_be_changed = False
+            else:
+                print("need to wait ", 10-state.elapsed_time) #todo remove this
         except StopIteration:
             logger.error("There is no task assigned for side %i", orientation)
 
@@ -277,12 +286,25 @@ async def main_loop(state: State, killer: GracefulKiller):
                 await client.start_notify(ORIENTATION_UUID, callback)
 
                 while not killer.kill_now:
+                    state.elapsed_time += 1
+                    print(f"{state.elapsed_time=}")
                     await asyncio.sleep(1)
         except Exception as e:
             logging.error(f"Failed to connect to client: {e}\nRetrying in 5 seconds...")
             await asyncio.sleep(5)
 
-    
+async def update_state_loop(state, config_dir, killer):
+    while not killer.kill_now:
+        with open(
+            os.path.join(config_dir, "config.yml"), "r", encoding="utf-8"
+        ) as config_file:
+            state.config.update(yaml.safe_load(config_file))
+
+            data = yamale.make_data(config_file.name)
+            yamale.validate(CONFIG_SCHEMA, data)
+            print("updated state")
+            while not killer.kill_now:
+                await asyncio.sleep(1)
 
 
 def main():
@@ -322,7 +344,7 @@ def main():
         
         current_time_entry = next(filter(lambda time_entry: time_entry["timeInterval"]["end"] is None, time_entries), None)
 
-        state = State(config=config, current_task=current_time_entry, session=session)
+        state = State(config=config, current_task=current_time_entry, session=session, orientation=0, start_time=now(), elapsed_time=0, to_be_changed=False)
         killer = GracefulKiller(state)
 
         asyncio.run(main_loop(state, killer))
