@@ -74,12 +74,7 @@ class State(RecordClass):
     session: Session
     orientation: int
     start_time: str    
-    elapsed_time: int
-    to_be_changed: bool
 
-    def __eq__(self, other):
-        return isinstance(other, State) and self.current_task is not None and other.current_task is not None and self.current_task.id == other.current_task.id
-    
     async def change(self, orientation):
         await asyncio.sleep(10)
         print(f"{self.orientation == orientation = }")
@@ -117,7 +112,6 @@ async def callback_with_state(
         return
 
     stop_current_task(state)
-    # with state_lock:
     try:
         state.orientation = orientation
         state.start_time = now()
@@ -268,7 +262,6 @@ async def print_device_information(client):
 
 async def main_loop(state: State, killer: GracefulKiller):
     """Main loop listening for orientation changes"""
-
     while not killer.kill_now:
         try:
             async with BleakClient(state.config["timeular"]["device-address"]) as client:
@@ -279,8 +272,6 @@ async def main_loop(state: State, killer: GracefulKiller):
                 await client.start_notify(ORIENTATION_UUID, callback)
 
                 while not killer.kill_now:
-                    # state.elapsed_time += 1
-                    # print(f"{state.elapsed_time=}")
                     await asyncio.sleep(1)
         except Exception as e:
             logging.error(f"Failed to connect to client: {e}\nRetrying in 5 seconds...")
