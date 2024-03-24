@@ -8,7 +8,7 @@ from functools import partial
 from getpass import getpass
 from threading import Lock
 from tkinter import simpledialog
-from typing import Optional
+from typing import Dict, Optional
 import copy
 
 import appdirs  # type: ignore
@@ -18,7 +18,7 @@ import yaml
 from bleak import BleakClient  # type: ignore
 from recordclass import RecordClass  # type: ignore
 from requests import Session
-import time
+
 
 MODEL_NUMBER_UUID = "00002a24-0000-1000-8000-00805f9b34fb"
 MANUFACTURER_UUID = "00002a29-0000-1000-8000-00805f9b34fb"
@@ -70,10 +70,12 @@ class State(RecordClass):
 
     # pylint: disable=too-few-public-methods
     current_task: Optional[dict]
+    config_dir: str
+    mapping: Dict[int, Dict[str, dict]]
     config: dict
     session: Session
     orientation: int
-    start_time: str    
+    start_time: str
 
     async def change(self, orientation):
         await asyncio.sleep(10)
@@ -109,6 +111,7 @@ async def callback_with_state(
     logger.info("Orientation: %i", orientation)
     if orientation not in range(1, 9):
         stop_current_task(state)
+        state.orientation = 0
         return
 
     stop_current_task(state)
@@ -272,7 +275,22 @@ async def main_loop(state: State, killer: GracefulKiller):
                 await client.start_notify(ORIENTATION_UUID, callback)
 
                 while not killer.kill_now:
+                    try:
+                        with open(
+                            os.path.join(state.config_dir, "config.yml"), "r", encoding="utf-8"
+                        ) as config_file:
+                            config = yaml.safe_load(config_file)
+                            orig_config = copy.deepcopy(config)
+                            if state.mapping != orig_config["mapping"]:
+                                data = yamale.make_data(config_file.name)
+                                yamale.validate(CONFIG_SCHEMA, data)
+                                for i, mapping in enumerate(state.config["mapping"]):
+                                    mapping.update(config["mapping"][i])
+
+                    except Exception as ex:
+                        logging.error(ex)
                     await asyncio.sleep(1)
+
         except Exception as e:
             logging.error(f"Failed to connect to client: {e}\nRetrying in 5 seconds...")
             await asyncio.sleep(5)
@@ -328,7 +346,7 @@ def main():
         
         current_time_entry = next(filter(lambda time_entry: time_entry["timeInterval"]["end"] is None, time_entries), None)
 
-        state = State(config=config, current_task=current_time_entry, session=session, orientation=0, start_time=now(), elapsed_time=0, to_be_changed=False)
+        state = State(config=config, config_dir=config_dir, mapping=config["mapping"], current_task=current_time_entry, session=session, orientation=0, start_time=now())
         killer = GracefulKiller(state)
 
         asyncio.run(main_loop(state, killer))
