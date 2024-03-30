@@ -11,10 +11,8 @@ python setup.py clean --all && pip install . && clockify-timeular
 
 
 # TODO
-- hot reload tasks      
+- on fail (eg internet connection) wait and try again
 - make so that it automatically runs / or at least is easy to call 
 
-- pomodoro
 - auto generate files in appdata
-- improve user interaction for updating tasks (maybe like in timeular)
-- "what are you working on"
+- improve user interaction for updating tasks (maybe like in timeular) ("what are you working on")

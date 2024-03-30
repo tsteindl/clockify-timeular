@@ -18,6 +18,8 @@ import yaml
 from bleak import BleakClient  # type: ignore
 from recordclass import RecordClass  # type: ignore
 from requests import Session
+from plyer import notification
+from plyer.utils import platform
 
 
 MODEL_NUMBER_UUID = "00002a24-0000-1000-8000-00805f9b34fb"
@@ -36,6 +38,7 @@ HEADERS = {
 CONFIG_SCHEMA = yamale.make_schema(
     content="""
 cli: bool(required=False)
+pomodoro: bool(required=False)
 timeular:
     device-address: regex('([0-9A-F]{2}):([0-9A-F]{2}):([0-9A-F]{2}):([0-9A-F]{2}):([0-9A-F]{2}):([0-9A-F]{2})')
 
@@ -67,20 +70,76 @@ state_lock = Lock()
 
 class State(RecordClass):
     """Application state"""
-
     # pylint: disable=too-few-public-methods
+
+    ELAPSE_TIME = 10
+    P_SESSION_MIN = 25
+    P_BREAK_MIN = 5
+    P_LONG_BREAK_MIN = 15
     current_task: Optional[dict]
     config_dir: str
     config: dict
     session: Session
     orientation: int
     start_time: str
+    pomodoro: bool
 
     async def change(self, orientation):
-        await asyncio.sleep(10)
+        await asyncio.sleep(self.ELAPSE_TIME)
         if self.orientation == orientation:
             time_entry = get_time_entry(self, self.orientation)
             start_time_entry(self, self.start_time, **time_entry)
+            if self.pomodoro:
+                await self.pomodoro_cycle()
+                print("pomodoro cycle stopped")
+
+    
+    async def pomodoro_cycle(self):
+        orig_task = copy.deepcopy(self.current_task)
+        sessions = 0
+        while self.current_task['id'] == orig_task['id']:
+            while sessions < 3:
+                if self.current_task['id'] != orig_task['id']:
+                    return
+                if sessions == 0:
+                    await asyncio.sleep(self.P_SESSION_MIN*60 - self.ELAPSE_TIME)
+                else:
+                    await asyncio.sleep(self.P_SESSION_MIN*60)
+                if self.current_task['id'] != orig_task['id']:
+                    return
+                notification.notify(
+                    title="Pomodoro",
+                    message=f"Your pomodoro session is over. Have a {self.P_BREAK_MIN} minutes break",
+                    timeout=25,  
+                    app_icon=None, 
+                )
+                await asyncio.sleep(self.P_BREAK_MIN*60)
+                if self.current_task['id'] != orig_task['id']:
+                    return
+                notification.notify(
+                    title="Pomodoro",
+                    message=f"Your pomodoro break is over. Continue working",
+                    timeout=25, 
+                    app_icon=None, 
+                )
+                sessions += 1
+
+            if self.current_task['id'] != orig_task['id']:
+                return
+            await asyncio.sleep(self.P_SESSION_MIN*60)
+            notification.notify(
+                title="Pomodoro",
+                message=f"Your pomodoro session is over. Have a long {self.P_LONG_BREAK_MIN} minutes break",
+                timeout=25,  
+                app_icon=None, 
+            )
+            await asyncio.sleep(self.P_LONG_BREAK_MIN*60)
+            notification.notify(
+                title="Pomodoro",
+                message=f"Your pomodoro break is over. Continue working",
+                timeout=25, 
+                app_icon=None, 
+            )
 
 
 class GracefulKiller:
@@ -222,10 +281,13 @@ def prompt_for_description(cli: bool):
             or ""
         )
 
+NO_TASK = {
+    "id": None
+}
 
 def stop_current_task(state: State):
     """Stop a task in Clockify"""
-    if state.current_task is None:
+    if state.current_task is NO_TASK:
         return
 
     data = {"end": now()}
@@ -236,7 +298,7 @@ def stop_current_task(state: State):
         headers=HEADERS,
     )
 
-    state.current_task = None
+    state.current_task = NO_TASK
 
 
 async def print_device_information(client):
@@ -329,8 +391,8 @@ def main():
         config["tasks"] = {}
         
         current_time_entry = next(filter(lambda time_entry: time_entry["timeInterval"]["end"] is None, time_entries), None)
-
-        state = State(config=config, config_dir=config_dir, current_task=current_time_entry, session=session, orientation=0, start_time=now())
+ 
+        state = State(config=config, config_dir=config_dir, current_task=current_time_entry, session=session, orientation=0, start_time=now(), pomodoro=("pomodoro" in config)) 
         killer = GracefulKiller(state)
 
         asyncio.run(main_loop(state, killer))
