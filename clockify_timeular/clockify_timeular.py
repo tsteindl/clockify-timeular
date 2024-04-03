@@ -392,7 +392,7 @@ def main():
         
         current_time_entry = next(filter(lambda time_entry: time_entry["timeInterval"]["end"] is None, time_entries), None)
  
-        state = State(config=config, config_dir=config_dir, current_task=current_time_entry, session=session, orientation=0, start_time=now(), pomodoro=("pomodoro" in config)) 
+        state = State(config=config, config_dir=config_dir, current_task=current_time_entry, session=session, orientation=0, start_time=now(), pomodoro=("pomodoro" in config and config["pomodoro"])) 
         killer = GracefulKiller(state)
 
         asyncio.run(main_loop(state, killer))

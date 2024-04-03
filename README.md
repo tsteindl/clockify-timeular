@@ -11,6 +11,8 @@ python setup.py clean --all && pip install . && clockify-timeular
 
 
 # TODO
+- async pomodoro tasks should be stopped once orientation has been changed once (maybe with active flag in state)
+- pomdoro breaks should be deducted from time
 - on fail (eg internet connection) wait and try again
 - make so that it automatically runs / or at least is easy to call 
 
