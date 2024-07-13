@@ -341,6 +341,7 @@ async def main_loop(state: State, killer: GracefulKiller):
                         ) as config_file:
                             config = yaml.safe_load(config_file)
                             if state.config["mapping"] != config["mapping"]:
+                                print("config change detected")
                                 data = yamale.make_data(config_file.name)
                                 yamale.validate(CONFIG_SCHEMA, data)
                                 for i, mapping in enumerate(state.config["mapping"]):
