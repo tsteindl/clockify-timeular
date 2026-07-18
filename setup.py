@@ -24,6 +24,7 @@ setup(
         "PyYAML",
         "tenacity",
         "yamale",
+        "plyer",
     ],
     entry_points={
         "console_scripts": ["clockify-timeular=clockify_timeular:main"],

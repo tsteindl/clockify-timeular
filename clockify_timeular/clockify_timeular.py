@@ -2,12 +2,10 @@ import asyncio
 import logging
 import os
 import signal
-import tkinter as tk
 from datetime import datetime
 from functools import partial
 from getpass import getpass
 from threading import Lock
-from tkinter import simpledialog
 from typing import Dict, Optional
 import copy
 
@@ -15,7 +13,8 @@ import appdirs  # type: ignore
 import requests
 import yamale  # type: ignore
 import yaml
-from bleak import BleakClient  # type: ignore
+from bleak import BleakClient, BleakScanner  # type: ignore
+from bleak.exc import BleakError  # type: ignore
 from recordclass import RecordClass  # type: ignore
 from requests import Session
 from plyer import notification
@@ -270,6 +269,8 @@ def prompt_for_description(cli: bool):
     if cli:
         return input("What are you working on? ")
     else:
+        import tkinter as tk  # lazy import: only needed for the GUI prompt
+        from tkinter import simpledialog
         root = tk.Tk()
         root.overrideredirect(1)
         root.withdraw()
@@ -327,7 +328,14 @@ async def main_loop(state: State, killer: GracefulKiller):
     """Main loop listening for orientation changes"""
     while not killer.kill_now:
         try:
-            async with BleakClient(state.config["timeular"]["device-address"]) as client:
+            address = state.config["timeular"]["device-address"]
+            # Explicitly scan first: the Tracker advertises intermittently and can
+            # be missed by BleakClient's short internal discovery on a weak link.
+            device = await BleakScanner.find_device_by_address(address, timeout=20.0)
+            if device is None:
+                raise BleakError(f"Device with address {address} not found while scanning")
+            async with BleakClient(device) as client:
+                logger.info("Connected to %s", device)
                 await print_device_information(client)
 
                 callback = partial(callback_with_state, state, client)
