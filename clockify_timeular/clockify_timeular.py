@@ -2,9 +2,12 @@ import asyncio
 import logging
 import os
 import signal
+import socket
+import sys
 from datetime import datetime
 from functools import partial
 from getpass import getpass
+from logging.handlers import RotatingFileHandler
 from threading import Lock
 from typing import Dict, Optional
 import copy
@@ -33,6 +36,14 @@ HEADERS = {
     "content-type": "application/json",
     "x-requested-with": "XMLHttpRequest",
 }
+
+# Every network call is synchronous and runs inside the BLE event loop, so it
+# MUST have a timeout: without one a stalled request (flaky Wi-Fi, captive
+# portal, ...) freezes the whole loop and the cube silently stops tracking.
+HTTP_TIMEOUT = 15
+
+# Arbitrary loopback port used only as a cross-process single-instance lock.
+SINGLE_INSTANCE_PORT = 50573
 
 CONFIG_SCHEMA = yamale.make_schema(
     content="""
@@ -165,18 +176,21 @@ async def callback_with_state(
     assert len(data) == 1
     orientation = data[0]
     logger.info("Orientation: %i", orientation)
-    if orientation not in range(1, 9):
-        stop_current_task(state)
-        state.orientation = 0
-        return
-
-    stop_current_task(state)
     try:
+        if orientation not in range(1, 9):
+            # Resting side / button press: just stop whatever is running.
+            stop_current_task(state)
+            state.orientation = 0
+            return
+
+        stop_current_task(state)
         state.orientation = orientation
         state.start_time = now()
         await state.change(orientation) #todo await should not be needed here
     except StopIteration:
         logger.error("There is no task assigned for side %i", orientation)
+    except Exception as ex:  # never let a transient error kill the notify handler
+        logger.exception("Failed to handle orientation %i: %s", orientation, ex)
 
 def get_time_entry(state: State, orientation: int):
     """Retrieve project (and task) for an orientation from the config file"""
@@ -199,9 +213,10 @@ def get_time_entry(state: State, orientation: int):
             "name": time_entry["project"]
         }
         resp = state.session.post(
-            state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/projects", 
-            json=data, 
-            headers=HEADERS
+            state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/projects",
+            json=data,
+            headers=HEADERS,
+            timeout=HTTP_TIMEOUT,
         )
         if resp.status_code == 201:
             project = resp.json()
@@ -215,8 +230,9 @@ def get_time_entry(state: State, orientation: int):
         if project["id"] not in state.config["tasks"]:
             #on demand requesting of tasks for projects
             resp = state.session.get(
-                state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/projects/{project['id']}/tasks", 
-                headers=HEADERS
+                state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/projects/{project['id']}/tasks",
+                headers=HEADERS,
+                timeout=HTTP_TIMEOUT,
             )
             if resp.status_code == 200:
                 state.config["tasks"][project["id"]] = resp.json()
@@ -230,9 +246,10 @@ def get_time_entry(state: State, orientation: int):
                 "name": time_entry["task"]
             }
             resp = state.session.post(
-                state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/projects/{project['id']}/tasks", 
+                state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/projects/{project['id']}/tasks",
                 json=data,
-                headers=HEADERS
+                headers=HEADERS,
+                timeout=HTTP_TIMEOUT,
             )
             if resp.status_code == 201:
                 task = resp.json()
@@ -253,9 +270,10 @@ def start_time_entry(state: State, start_time: str, description: str, project_id
         data["taskId"] = task_id
 
     resp = state.session.post(
-        state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/time-entries", 
-        json=data, 
-        headers=HEADERS
+        state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/time-entries",
+        json=data,
+        headers=HEADERS,
+        timeout=HTTP_TIMEOUT,
     )
     if resp.status_code == 201:
         state.current_task = resp.json()
@@ -297,6 +315,7 @@ def stop_current_task(state: State):
         state.config["clockify"]["endpoint"] + f"/workspaces/{state.config['workspace']}/user/{state.config['user_id']}/time-entries",
         json=data,
         headers=HEADERS,
+        timeout=HTTP_TIMEOUT,
     )
 
     state.current_task = NO_TASK
@@ -324,84 +343,165 @@ async def print_device_information(client):
     logger.info("Firmware Revision: %s", "".join(map(chr, firmware_revision)))
 
 
+def reload_config(state: State):
+    """Hot-reload the side->time_entry mapping if config.yml changed on disk."""
+    try:
+        path = os.path.join(state.config_dir, "config.yml")
+        with open(path, "r", encoding="utf-8") as config_file:
+            config = yaml.safe_load(config_file)
+        if config and state.config["mapping"] != config["mapping"]:
+            logger.info("Config change detected, reloading mapping")
+            data = yamale.make_data(path)
+            yamale.validate(CONFIG_SCHEMA, data)
+            for i, mapping in enumerate(state.config["mapping"]):
+                mapping.update(config["mapping"][i])
+    except Exception as ex:
+        # A bad edit (or an edit made while connected) must never crash the app;
+        # just keep the last-known-good mapping and log it.
+        logger.error("Ignoring invalid config change: %s", ex)
+
+
 async def main_loop(state: State, killer: GracefulKiller):
-    """Main loop listening for orientation changes"""
+    """Main loop: (re)connect to the Tracker and listen for orientation changes."""
+    backoff = 5
     while not killer.kill_now:
+        loop = asyncio.get_running_loop()
+        disconnected_event = asyncio.Event()
         try:
             address = state.config["timeular"]["device-address"]
             # Explicitly scan first: the Tracker advertises intermittently and can
             # be missed by BleakClient's short internal discovery on a weak link.
+            logger.info("Scanning for Tracker %s ...", address)
             device = await BleakScanner.find_device_by_address(address, timeout=20.0)
             if device is None:
                 raise BleakError(f"Device with address {address} not found while scanning")
-            async with BleakClient(device) as client:
+
+            def _on_disconnect(_client):
+                logger.warning("Tracker disconnected")
+                loop.call_soon_threadsafe(disconnected_event.set)
+
+            async with BleakClient(device, disconnected_callback=_on_disconnect) as client:
                 logger.info("Connected to %s", device)
-                await print_device_information(client)
+                backoff = 5  # reset after a successful connection
+                try:
+                    await print_device_information(client)
+                except Exception as ex:  # some firmware hides these characteristics
+                    logger.debug("Could not read device information: %s", ex)
 
                 callback = partial(callback_with_state, state, client)
-
                 await client.start_notify(ORIENTATION_UUID, callback)
 
-                while not killer.kill_now:
+                # Stay connected until the cube drops or we're asked to quit.
+                # Crucially we watch for disconnection here; the old code assumed
+                # the link never dropped and got stuck "connected" but deaf.
+                while not killer.kill_now and not disconnected_event.is_set():
+                    if not client.is_connected:
+                        disconnected_event.set()
+                        break
+                    reload_config(state)
                     try:
-                        with open(
-                            os.path.join(state.config_dir, "config.yml"), "r", encoding="utf-8"
-                        ) as config_file:
-                            config = yaml.safe_load(config_file)
-                            if state.config["mapping"] != config["mapping"]:
-                                print("config change detected")
-                                data = yamale.make_data(config_file.name)
-                                yamale.validate(CONFIG_SCHEMA, data)
-                                for i, mapping in enumerate(state.config["mapping"]):
-                                    mapping.update(config["mapping"][i])
+                        await asyncio.wait_for(disconnected_event.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        pass
 
-                    except Exception as ex:
-                        logging.error(ex)
-                    await asyncio.sleep(1)
-
+            if not killer.kill_now:
+                logger.info("Link lost, reconnecting ...")
         except Exception as e:
-            logging.error(f"Failed to connect to client: {e}\nRetrying in 5 seconds...")
-            await asyncio.sleep(5)
+            logger.error("Connection problem: %s. Retrying in %ss ...", e, backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)  # exponential backoff, capped
+
+
+def setup_logging(config_dir: str):
+    """Log to a rotating file so a detached (pythonw) run is diagnosable."""
+    log_path = os.path.join(config_dir, "clockify-timeular.log")
+    handler = RotatingFileHandler(
+        log_path, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+    )
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+    logger.info("Logging to %s", log_path)
+
+
+def ensure_single_instance():
+    """Exit if another instance is already running (they'd fight over the BLE link)."""
+    # Bind a loopback socket held open for the process lifetime; a second bind
+    # fails with EADDRINUSE. Stored on a module global so it isn't GC'd/closed.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
+    except OSError:
+        logger.error("Another instance is already running; exiting.")
+        sys.exit(0)
+    global _single_instance_sock
+    _single_instance_sock = sock
+
+
+_single_instance_sock = None
+
+
+def bootstrap_clockify(config: dict) -> tuple:
+    """Fetch user/workspace/projects, retrying so a boot before Wi-Fi is up survives."""
+    session = requests.Session()
+    HEADERS["x-api-key"] = config["clockify"]["api-key"]
+    endpoint = config["clockify"]["endpoint"]
+
+    backoff = 5
+    while True:
+        try:
+            user_data = session.get(endpoint + "/user", headers=HEADERS, timeout=HTTP_TIMEOUT).json()
+            config["workspace"] = user_data["activeWorkspace"]
+            config["user_id"] = user_data["id"]
+
+            time_entries = session.get(
+                endpoint + f"/workspaces/{config['workspace']}/user/{config['user_id']}/time-entries",
+                headers=HEADERS, timeout=HTTP_TIMEOUT,
+            ).json()
+            config["projects"] = session.get(
+                endpoint + f"/workspaces/{config['workspace']}/projects",
+                headers=HEADERS, timeout=HTTP_TIMEOUT,
+            ).json()
+            current = next(
+                filter(lambda te: te["timeInterval"]["end"] is None, time_entries), None
+            )
+            return session, current
+        except Exception as ex:
+            logger.error("Clockify not reachable yet (%s). Retrying in %ss ...", ex, backoff)
+            import time
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
 
 
 def main():
     """Console script entry point"""
     config_dir = appdirs.user_config_dir(appname="clockify-timeular")
+    setup_logging(config_dir)
+    ensure_single_instance()
 
-    with open(
-        os.path.join(config_dir, "config.yml"), "r", encoding="utf-8"
-    ) as config_file:
-        config = yaml.safe_load(config_file)
-
-        data = yamale.make_data(config_file.name)
+    try:
+        with open(os.path.join(config_dir, "config.yml"), "r", encoding="utf-8") as config_file:
+            config = yaml.safe_load(config_file)
+        data = yamale.make_data(os.path.join(config_dir, "config.yml"))
         yamale.validate(CONFIG_SCHEMA, data)
+    except Exception as ex:
+        logger.exception("Invalid or missing config.yml: %s", ex)
+        sys.exit(1)
 
-        if "cli" not in config:
-            config["cli"] = False
+    if "cli" not in config:
+        config["cli"] = False
 
-        session = requests.Session()
+    session, current_time_entry = bootstrap_clockify(config)
+    config["tasks"] = {}
 
-        HEADERS['x-api-key'] = config["clockify"]["api-key"]
-        user_data = session.get(config["clockify"]["endpoint"] + '/user', headers=HEADERS).json()
-        config["workspace"] = user_data['activeWorkspace']
-        config["user_id"] = user_data['id']
+    state = State(
+        config=config, config_dir=config_dir, current_task=current_time_entry,
+        session=session, orientation=0, start_time=now(),
+        pomodoro=("pomodoro" in config and config["pomodoro"]),
+    )
+    killer = GracefulKiller(state)
 
-        time_entries = session.get(
-            config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/user/{config['user_id']}/time-entries", 
-            headers=HEADERS
-        ).json()
-          
-        config["projects"] = session.get(
-            config["clockify"]["endpoint"] + f"/workspaces/{config['workspace']}/projects", 
-            headers=HEADERS
-        ).json()
-
-
-        config["tasks"] = {}
-        
-        current_time_entry = next(filter(lambda time_entry: time_entry["timeInterval"]["end"] is None, time_entries), None)
- 
-        state = State(config=config, config_dir=config_dir, current_task=current_time_entry, session=session, orientation=0, start_time=now(), pomodoro=("pomodoro" in config and config["pomodoro"])) 
-        killer = GracefulKiller(state)
-
-        asyncio.run(main_loop(state, killer))
+    asyncio.run(main_loop(state, killer))
